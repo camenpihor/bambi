@@ -1,3 +1,4 @@
+"""Add PyMC3 as an available backend."""
 from __future__ import absolute_import
 
 import re
@@ -7,219 +8,281 @@ import numpy as np
 import pymc3 as pm
 from pymc3.model import TransformedRV
 import theano
-from bambi.external.six import string_types
-from bambi.priors import Prior
-from bambi.results import MCMCResults, PyMC3ADVIResults
 
 from .base import BackEnd
+from ..external.six import string_types
+from ..priors import Prior
+from ..results import MCMCResults, PyMC3ADVIResults
 
 
 class PyMC3BackEnd(BackEnd):
+    """PyMC3 model-fitting backend.
 
-    '''
-    PyMC3 model-fitting back-end.
-    '''
+    Inherits from the BackEnd class.
 
-    # Available link functions
+    Attributes
+    ----------
+    links : dict
+        Available link functions.
+    dists : dict
+        Available distributions.
+    model : pm.Model
+        A PyMC3 `Model` instance, which will be built up.
+    mu : float
+        mean
+    spec : bambi.models.Model
+        A bambi Model instance containing the abstract specification of the model to compile.
+    trace : pymc3.backends.base.MultiTrace
+        A `MultiTrace` object that contains the samples.
+    advi_params : pm.variational.approximations.MeanFieldGroup
+        A `MeanFieldGroup` object that contains the approximation to the posterior.
+    """
+
     links = {
-        'identity': lambda x: x,
-        'logit': theano.tensor.nnet.sigmoid,
-        'inverse': theano.tensor.inv,
-        'inverse_squared': lambda x: theano.tensor.inv(theano.tensor.sqrt(x)),
-        'log': theano.tensor.exp
+        "identity": lambda x: x,
+        "logit": theano.tensor.nnet.sigmoid,
+        "inverse": theano.tensor.inv,
+        "inverse_squared": lambda x: theano.tensor.inv(theano.tensor.sqrt(x)),
+        "log": theano.tensor.exp
     }
 
-    dists = {
-        'HalfFlat': pm.Bound(pm.Flat, lower=0)
-    }
+    dists = {"HalfFlat": pm.Bound(pm.Flat, lower=0)}
 
     def __init__(self):
-
-        self.reset()
-
-        # Attributes defined elsewhere
-        self.mu = None  # build()
-        self.spec = None  # build()
-        self.trace = None  # build()
-        self.advi_params = None  # build()
-
-    def reset(self):
-        '''
-        Reset PyMC3 model and all tracked distributions and parameters.
-        '''
         self.model = pm.Model()
         self.mu = None
-        self.par_groups = {}
+        self.spec = None
+        self.trace = None
+        self.advi_params = None
+
+    def reset(self):
+        """Reset PyMC3 model and all tracked distributions and parameters."""
+        self.model = pm.Model()
+        self.mu = None
+        self.spec = None
+        self.trace = None
+        self.advi_params = None
+
+    def _expand_args(self, spec, key, value, label):
+        if isinstance(value, Prior):
+            label = f"{label}_{key}"
+            return self._build_dist(spec, label, value.name, **value.args)
+        return value
 
     def _build_dist(self, spec, label, dist, **kwargs):
-        ''' Build and return a PyMC3 Distribution. '''
+        """Build and return the specified PyMC3 distribution.
+
+        Build a distribution and its hyperparameters, if exist. Provide hyperparameters in **kwargs
+        where the key is the desired label and the value is the PyMC3 Prior.
+
+        Parameters
+        ----------
+        spec : bambi.models.Model
+            A bambi Model instance containing the abstract specification of the model to compile.
+        label : str
+            Label used for the distribution.
+        dist : str | pm.distributions
+            PyMC3 distribution to build. If `str`, then attempt to find the PyMC3 distribution
+            matching the string name.
+
+        Returns
+        -------
+        pm.distributions
+            The specified PyMC3 distribution.
+
+        Raises
+        ------
+        ValueError
+            Returned if `dist` is a string whose value is not a distribution in PyMC3.
+        """
+        # If `dist` is of type `str`, then find the matching PyMC3 distribution
         if isinstance(dist, string_types):
             if hasattr(pm, dist):
                 dist = getattr(pm, dist)
             elif dist in self.dists:
                 dist = self.dists[dist]
             else:
-                raise ValueError("The Distribution class '%s' was not "
-                                 "found in PyMC3 or the PyMC3BackEnd." % dist)
+                raise ValueError(
+                    f"The Distribution class {dist} was not found in PyMC3 or the PyMC3BackEnd."
+                )
 
-        # Inspect all args in case we have hyperparameters
-        def _expand_args(key, value, label):
-            if isinstance(value, Prior):
-                label = '%s_%s' % (label, key)
-                return self._build_dist(spec, label, value.name, **value.args)
-            return value
+        # Inspect all kwargs. If hyperparameter is found, build the hyper parameter distribution
+        kwargs = {
+            key: self._expand_args(
+                spec=spec, key=key, value=value, label=label
+            ) for (key, value) in kwargs.items()
+        }
 
-        kwargs = {k: _expand_args(k, v, label) for (k, v) in kwargs.items()}
-
-        # Non-centered parameterization for hyperpriors
-        if spec.noncentered and 'sd' in kwargs and 'observed' not in kwargs \
-                and isinstance(kwargs['sd'], pm.model.TransformedRV):
-            old_sd = kwargs['sd']
-            _offset = pm.Normal(label + '_offset', mu=0, sd=1,
-                                shape=kwargs['shape'])
+        # Handle non-centered parameterization for any hyperparameters
+        if (
+            spec.noncentered and
+            "sd" in kwargs and
+            "observed" not in kwargs and
+            isinstance(kwargs["sd"], pm.model.TransformedRV)
+        ):
+            old_sd = kwargs["sd"]
+            _offset = pm.Normal(label + "_offset", mu=0, sd=1, shape=kwargs["shape"])
             return pm.Deterministic(label, _offset * old_sd)
 
         return dist(label, **kwargs)
 
-    def build(self, spec, reset=True):  # pylint: disable=arguments-differ
-        '''
-        Compile the PyMC3 model from an abstract model specification.
-        Args:
-            spec (Model): A bambi Model instance containing the abstract
-                specification of the model to compile.
-            reset (bool): if True (default), resets the PyMC3BackEnd instance
-                before compiling.
-        '''
+    def build(self, spec, reset=True):
+        """Compile the PyMC3 model from an abstract model specification.
+
+        Parameters
+        ----------
+        spec : bambi.models.Model
+            A bambi Model instance containing the abstract specification of the model to compile.
+        reset : bool, optional
+            If True, reset the PyMC3BackEnd instance before compiling, by default True.
+        """
         if reset:
             self.reset()
 
         with self.model:
-
             self.mu = 0.
+            for model_term in spec.terms.values():
+                data = model_term.data
+                label = model_term.name
+                dist_name = model_term.prior.name
+                dist_args = model_term.prior.args
+                n_cols = model_term.data.shape[1]
 
-            for t in spec.terms.values():
-
-                data = t.data
-                label = t.name
-                dist_name = t.prior.name
-                dist_args = t.prior.args
-
-                n_cols = t.data.shape[1]
-
-                coef = self._build_dist(spec, label, dist_name,
+                coef_dist = self._build_dist(spec, label, dist_name,
                                         shape=n_cols, **dist_args)
 
-                if t.random:
-                    self.mu += coef[t.group_index][:, None] * t.predictor
+                if model_term.random:
+                    self.mu += coef_dist[model_term.group_index][:, None] * model_term.predictor
                 else:
-                    self.mu += pm.math.dot(data, coef)[:, None]
+                    self.mu += pm.math.dot(data, coef_dist)[:, None]
 
-            y = spec.y.data
+            link_function = spec.family.link
+            if isinstance(link_function, string_types):
+                link_function = self.links[link_function]
+
             y_prior = spec.family.prior
-            link_f = spec.family.link
-            if isinstance(link_f, string_types):
-                link_f = self.links[link_f]
-            else:
-                link_f = link_f
-            y_prior.args[spec.family.parent] = link_f(self.mu)
-            y_prior.args['observed'] = y
+            y_prior.args[spec.family.parent] = link_function(self.mu)
+            y_prior.args["observed"] = spec.y.data
+
             self._build_dist(spec, spec.y.name, y_prior.name, **y_prior.args)
             self.spec = spec
 
     def _get_transformed_vars(self):
-        rvs = self.model.unobserved_RVs
         # identify the variables that pymc3 back-transformed to original scale
-        trans = [var.name for var in rvs if isinstance(var, TransformedRV)]
+        transformed_variables = [
+            var.name
+            for var in self.model.unobserved_RVs
+            if isinstance(var, TransformedRV)
+        ]
+
         # find the corresponding transformed variables
-        trans = set(x.name for x in rvs if any([t in x.name for t in trans])) \
-            - set(trans)
+        transformed_variables = set(
+            var.name
+            for var in self.model.unobserved_RVs
+            if any([x in var.name for x in transformed_variables])
+        ) - set(transformed_variables)
+
         # add any "centered" random effects to the list
-        for varname in [var.name for var in rvs]:
-            if re.search(r'_offset$', varname) is not None:
-                trans.add(varname)
+        for var_name in [var.name for var in self.model.unobserved_RVs]:
+            if re.search(r'_offset$', var_name) is not None:
+                transformed_variables.add(var_name)
+        return transformed_variables
 
-        return trans
+    def run(self, start=None, method="mcmc", init="auto", n_init=50_000, **sampler_kwargs):
+        """Run the PyMC3 sampler.
 
-    # pylint: disable=arguments-differ, inconsistent-return-statements
-    def run(self, start=None, method='mcmc', init='auto', n_init=50000, **kwargs):
-        '''
-        Run the PyMC3 MCMC sampler.
-        Args:
-            start: Starting parameter values to pass to sampler; see
-                pm.sample() documentation for details.
-            method: The method to use for fitting the model. By default,
-                'mcmc', in which case the PyMC3 sampler will be used.
-                Alternatively, 'advi', in which case the model will be fitted
-                using  automatic differentiation variational inference as
-                implemented in PyMC3.
-            init: Initialization method (see PyMC3 sampler documentation). Currently, this is
-                 `'jitter+adapt_diag'`, but this can change in the future.
-            n_init: Number of initialization iterations if init = 'advi' or
-                'nuts'. Default is kind of in PyMC3 for the kinds of models
-                we expect to see run with bambi, so we lower it considerably.
-            kwargs (dict): Optional keyword arguments passed onto the sampler.
-        Returns: A PyMC3ModelResults instance.
-        '''
+        Parameters
+        ----------
+        start : dict, or array of dict, optional
+            Starting parameter values to pass to the sampler; see pm.sample() documentation for
+            details, by default None.
+        method : str, optional
+            The method to use for fitting the model. If "mcmc", the PyMC3 sampler will be used.
+            Alternatively, "advi" designates that the model will be fit using automatic
+            differentiation variational inference (ADVI) as implemented in PyMC3. By default "mcmc".
+        init : str, optional
+            Initialization method (see PyMC3 sampler documentation). Currently, their default is
+            "jitter+adapt_diag". By default 'auto'.
+        n_init : int, optional
+            If init = 'advi' or 'nuts', then this designates the number of initialization
+            iterations, by default 50,000.
 
-        if method == 'mcmc':
-            samples = kwargs.pop('samples', 1000)
-            cores = kwargs.pop('chains', 1)
+        Returns
+        -------
+        PyMC3ModelResults
+        """
+        if method == "mcmc":
+            num_samples = sampler_kwargs.pop("samples", 1_000)
+            cores = sampler_kwargs.pop("chains", 1)
             with self.model:
-                self.trace = pm.sample(samples, start=start, init=init,
-                                       n_init=n_init, cores=cores, **kwargs)
+                self.trace = pm.sample(draws=num_samples, start=start, init=init,
+                                       n_init=n_init, cores=cores, **sampler_kwargs)
             return self._convert_to_results()
 
-        elif method == 'advi':
+        elif method == "advi":
             with self.model:
-                self.advi_params = pm.variational.ADVI(start, **kwargs)
-            return PyMC3ADVIResults(  # pylint: disable=abstract-class-instantiated
-                self.spec,
-                self.advi_params
-            )
+                self.advi_params = pm.variational.ADVI(start=start, **sampler_kwargs)
+            return PyMC3ADVIResults(self.spec, self.advi_params)
+
+        raise ValueError(f"Invalid method ({method}) must be either 'advi' or 'mcmc'")
+
+    def _get_levels(self, key, value):
+        if len(value):
+            # fixed effects
+            if not self.spec.terms[re.sub(r"_offset$", "", key)].random:
+                return self.spec.terms[key].levels
+
+            # random effects
+            else:
+                re1 = re.match(r"(.+)(?=_offset)(_offset)", key)
+                # handle "centered" terms
+                if re1 is None:
+                    return [
+                        key.split("|")[0] + "|" + x
+                        for x in self.spec.terms[key].levels
+                    ]
+                # handle "non-centered" terms
+                else:
+                    return [
+                        "{}|{}_offset{}".format(
+                            key.split("|")[0],
+                            *re.match(r"^(.+)(\[.+\])$", x).groups()
+                        )
+                        for x in self.spec.terms[re1.group(1)].levels
+                    ]
+        return [key]
 
     def _convert_to_results(self):
-        # grab samples as big, unlabelled array
-        # dimensions 0, 1, 2 = samples, chains, variables
-        data = np.array(
+        """Convert PyMC3 results to Bambi-readable results."""
+        straces = self.trace._straces  # pylint: disable=protected-access
+
+        pymc3_results = np.array(
             [
-                np.array([np.atleast_2d(x.T).T[:, i]
-                for x in self.trace._straces[j].samples.values()  # pylint: disable=protected-access
-                for i in range(np.atleast_2d(x.T).T.shape[1])])
-                for j in range(len(self.trace._straces))  # pylint: disable=protected-access
+                np.array([np.atleast_2d(sample.T).T[:, chain_idx]
+                for sample in straces[variable_idx].samples.values()
+                for chain_idx in range(np.atleast_2d(sample.T).T.shape[1])])
+                for variable_idx in range(len(straces))
             ]
         )
-        data = np.swapaxes(np.swapaxes(data, 0, 1), 0, 2)
+        pymc3_results = np.swapaxes(np.swapaxes(pymc3_results, 0, 1), 0, 2)
 
-        # arrange var_shapes dictionary in same order as samples dictionary
+        # arange var_shapes dictionary in same order as samples dictionary
         shapes = OrderedDict()
-        for key in self.trace._straces[0].samples:  # pylint: disable=protected-access
-            shapes[key] = self.trace._straces[0].var_shapes[key]  # pylint: disable=protected-access
+        for key in straces[0].samples:
+            shapes[key] = straces[0].var_shapes[key]
 
-        # grab info necessary for making samplearray pretty
-        names = list(shapes.keys())
-        dims = list(shapes.values())
-        def get_levels(key, value):
-            if len(value):
-                # fixed effects
-                if not self.spec.terms[re.sub(r'_offset$', '', key)].random:
-                    return self.spec.terms[key].levels
-                # random effects
-                else:
-                    re1 = re.match(r'(.+)(?=_offset)(_offset)', key)
-                    # handle "centered" terms
-                    if re1 is None:
-                        return [key.split('|')[0]+'|'+x
-                                for x in self.spec.terms[key].levels]
-                    # handle "non-centered" terms
-                    else:
-                        return ['{}|{}_offset{}'.format(key.split('|')[0],
-                                *re.match(r'^(.+)(\[.+\])$', x).groups())
-                                for x in self.spec.terms[re1.group(1)].levels]
-            else:
-                return [key]
-        levels = sum([get_levels(k, v) for k, v in shapes.items()], [])
+        # grab info necessary for making sample array pretty
+        levels = sum(
+            iterable=[self._get_levels(key=key, value=value) for key, value in shapes.items()],
+            start=[]
+        )
 
         # instantiate
-        return MCMCResults(model=self.spec, data=data, names=names, dims=dims,
-                           levels=levels,
-                           transformed_vars=self._get_transformed_vars())
+        return MCMCResults(
+            model=self.spec,
+            data=pymc3_results,
+            names=list(shapes.keys()),
+            dims=list(shapes.values()),
+            levels=levels,
+            transformed_vars=self._get_transformed_vars()
+        )

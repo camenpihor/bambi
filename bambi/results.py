@@ -419,8 +419,13 @@ class PyMC3ADVIResults(ModelResults):
     """
 
     def __init__(self, model, params):
-
         self.means = params["means"]
         self.sds = params["stds"]
         self.elbo_vals = params["elbo_vals"]
         super(PyMC3ADVIResults, self).__init__(model)
+
+    def plot(self):
+        raise NotImplementedError
+
+    def summary(self):
+        raise NotImplementedError
