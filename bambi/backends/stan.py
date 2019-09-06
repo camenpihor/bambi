@@ -1,3 +1,4 @@
+"""Add Stan as an available backend."""
 from __future__ import absolute_import
 
 import re
@@ -5,10 +6,9 @@ import re
 from six import string_types
 
 import numpy as np
-from bambi.priors import Prior
-from bambi.results import MCMCResults
-
 from .base import BackEnd
+from ..priors import Prior
+from ..results import MCMCResults
 
 try:
     import pystan as ps
@@ -17,63 +17,76 @@ except ImportError:
 
 
 class StanBackEnd(BackEnd):  # pylint: disable=too-many-instance-attributes
+    """Stan/PyStan model-fitting back-end.
 
-    '''
-    Stan/PyStan model-fitting back-end.
-    '''
+    Attributes
+    ----------
+    links : dict
+        Available link functions.
+    dists : dict
+        Available distributions.
+    parameters :
+
+    transformed_parameters :
+
+    expressions :
+
+    data :
+
+    transformed_data :
+
+    X :
+
+    model :
+
+    mu_cont :
+
+    mu_cat :
+
+    _original_names :
+
+    _suppress_vars :
+
+    model_code :
+
+    spec :
+
+    stan_model :
+
+    fit :
+
+    """
 
     # distribution names and arg names should match those in priors.json,
     dists = {
-        'Normal': {'name': 'normal', 'args': ['#mu', '#sd']},
-        'Bernoulli': {'name': 'bernoulli', 'args': ['#p']},
-        'Poisson': {'name': 'poisson', 'args': ['#mu']},
-        'Cauchy': {'name': 'cauchy', 'args': ['#alpha', '#beta']},
-        'HalfNormal': {'name': 'normal', 'args': ['0', '#sd'],
-                       'bounds': '<lower=0>'},
-        'HalfCauchy': {'name': 'cauchy', 'args': ['0', '#beta'],
-                       'bounds': '<lower=0>'},
+        "Normal": {"name": "normal", "args": ["#mu", "#sd"]},
+        "Bernoulli": {"name": "bernoulli", "args": ["#p"]},
+        "Poisson": {"name": "poisson", "args": ["#mu"]},
+        "Cauchy": {"name": "cauchy", "args": ["#alpha", "#beta"]},
+        "HalfNormal": {"name": "normal", "args": ["0", "#sd"],
+                       "bounds": "<lower=0>"},
+        "HalfCauchy": {"name": "cauchy", "args": ["0", "#beta"], "bounds": "<lower=0>"},
         # for Uniform, the bounds are the parameters. _map_dist fills these in
-        'Uniform': {'name': 'uniform', 'args': ['#lower', '#upper'],
-                    'bounds': '<lower={}, upper={}>'},
-        'Flat': {'name': None, 'args': []},
-        'HalfFlat':  {'name': None, 'args': [], 'bounds': '<lower=0>'}
+        "Uniform": {"name": 'uniform', "args": ["#lower", "#upper"],
+                    "bounds": "<lower={}, upper={}>"},
+        "Flat": {"name": None, "args": []},
+        "HalfFlat":  {"name": None, "args": [], "bounds": "<lower=0>"}
     }
 
-    # maps from spec.family.name to 'dists' dictionary
-    # and gives the Stan variable type for the response
+    # maps from spec.family.name to 'dists' and gives the Stan variable type for the response
     families = {
-        'gaussian': {'name': 'Normal', 'type': float,
-            'format': ['vector[N]', '']},
-        'bernoulli': {'name': 'Bernoulli', 'type': int,
-            'format': ['int', '[N]']},
-        'poisson': {'name': 'Poisson', 'type': int,
-            'format': ['int', '[N]']}
+        "gaussian": {"name": "Normal", "type": float, "format": ["vector[N]", ""]},
+        "bernoulli": {"name": "Bernoulli", "type": int, "format": ["int", "[N]"]},
+        "poisson": {'name': "Poisson", "type": int, "format": ["int", "[N]"]}
     }
 
     # maps from spec.family.link to Stan inverse link function name
-    links = {
-        'identity': '',
-        'logit': 'inv_logit',
-        'log': 'exp',
-        'inverse_squared': 'inv_sqrt'
-    }
+    links = {"identity": "", "logit": "inv_logit", "log": "exp", "inverse_squared": "inv_sqrt"}
 
     def __init__(self):
         if ps is None:
-            raise ImportError("Could not import PyStan; please make sure it's "
-                              "installed.")
-        self.reset()
+            raise ImportError("Could not import PyStan; please make sure it's installed.")
 
-        # Attributes defined elsewhere
-        self.model_code = None  # build()
-        self.spec = None  # build()
-        self.stan_model = None  # build()
-        self.fit = None  # run()
-
-    def reset(self):
-        '''
-        Reset Stan model and all tracked distributions and parameters.
-        '''
         self.parameters = []
         self.transformed_parameters = []
         self.expressions = []
@@ -89,15 +102,35 @@ class StanBackEnd(BackEnd):  # pylint: disable=too-many-instance-attributes
         # code and then sub back later.
         self._suppress_vars = ['yhat', 'lp__']
 
-    def build(self, spec, reset=True):  # pylint: disable=arguments-differ
-        '''
-        Compile the Stan model from an abstract model specification.
-        Args:
-            spec (Model): A bambi Model instance containing the abstract
-                specification of the model to compile.
-            reset (bool): if True (default), resets the StanBackEnd instance
-                before compiling.
-        '''
+        self.model_code = None
+        self.spec = None
+        self.stan_model = None
+        self.fit = None
+
+    def reset(self):
+        """Reset Stan model and all tracked distributions and parameters."""
+        self.parameters = []
+        self.transformed_parameters = []
+        self.expressions = []
+        self.data = []
+        self.transformed_data = []
+        self.X = {}
+        self.model = []
+        self.mu_cont = []
+        self.mu_cat = []
+        self._original_names = {}
+        self._suppress_vars = ['yhat', 'lp__']
+
+    def build(self, spec, reset=True):
+        """Compile the Stan model from an abstract model specification.
+
+        Parameters
+        ----------
+        spec : bambi.models.Model
+            A bambi Model instance containing the abstract specification of the model to compile.
+        reset : bool, optional
+            If True, reset the StanBackEnd instance before compiling, by default True.
+        """
         if reset:
             self.reset()
 

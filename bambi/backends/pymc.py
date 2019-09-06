@@ -277,7 +277,6 @@ class PyMC3BackEnd(BackEnd):
             start=[]
         )
 
-        # instantiate
         return MCMCResults(
             model=self.spec,
             data=pymc3_results,
